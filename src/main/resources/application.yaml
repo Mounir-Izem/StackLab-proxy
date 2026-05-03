@@ -1,0 +1,11 @@
+spring:
+  application:
+    name: proxy
+
+server:
+  port: 8080
+
+metals-dev:
+  api-key: ${METALS_DEV_API_KEY:}
+  base-url: https://api.metals.dev/v1
+  cache-ttl-minutes: ${METALS_DEV_CACHE_TTL_MINUTES:60}
