@@ -3,7 +3,7 @@ spring:
     name: proxy
 
 server:
-  port: 8080
+  port: ${PORT:8080}
 
 metals-dev:
   api-key: ${METALS_DEV_API_KEY:}
