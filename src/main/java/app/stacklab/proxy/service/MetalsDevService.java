@@ -7,8 +7,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
+import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,9 +55,23 @@ public class MetalsDevService {
         return new LastKnown(gold, silver, currency, cache.timestamps().metal());
     }
 
+    private static final ZoneId NEW_YORK = ZoneId.of("America/New_York");
+    private static final LocalTime MARKET_CLOSE  = LocalTime.of(17, 0); // vendredi 17h00 ET
+    private static final LocalTime MARKET_REOPEN = LocalTime.of(18, 0); // dimanche 18h00 ET
+
+    private boolean isMarketClosed() {
+        ZonedDateTime now = ZonedDateTime.now(NEW_YORK);
+        DayOfWeek day = now.getDayOfWeek();
+        LocalTime time = now.toLocalTime();
+        return day == DayOfWeek.SATURDAY
+            || day == DayOfWeek.SUNDAY && time.isBefore(MARKET_REOPEN)
+            || day == DayOfWeek.FRIDAY && !time.isBefore(MARKET_CLOSE);
+    }
+
     private boolean isCacheValid() {
-        return cache != null && cacheUpdatedAt != null &&
-               Duration.between(cacheUpdatedAt, Instant.now()).toMinutes() < cacheTtlMinutes;
+        if (cache == null || cacheUpdatedAt == null) return false;
+        if (isMarketClosed()) return true;
+        return Duration.between(cacheUpdatedAt, Instant.now()).toMinutes() < cacheTtlMinutes;
     }
 
     private MetalsDevResponse callMetalsDev() {
