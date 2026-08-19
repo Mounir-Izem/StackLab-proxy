@@ -3,6 +3,8 @@ package app.stacklab.proxy.service;
 import app.stacklab.proxy.model.LastKnown;
 import app.stacklab.proxy.model.MetalsDevResponse;
 import app.stacklab.proxy.model.PricesResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
@@ -19,6 +21,8 @@ import java.util.Map;
 
 @Service
 public class MetalsDevService {
+
+    private static final Logger log = LoggerFactory.getLogger(MetalsDevService.class);
 
     @Value("${metals-dev.api-key}")
     private String apiKey;
@@ -39,13 +43,21 @@ public class MetalsDevService {
     }
 
     public PricesResponse getPrices(String currency) {
-        boolean fromCache = isCacheValid();
-        if (!fromCache) {
-            MetalsDevResponse fresh = callMetalsDev();
-            cache = fresh;
-            cacheUpdatedAt = Instant.now();
+        boolean triggeredFetch = false;
+        if (!isCacheValid()) {
+            // Verrou anti-ruée : sur cache froid, deux requêtes simultanées ne
+            // doivent déclencher qu'un seul appel upstream. Double-check à
+            // l'entrée du bloc synchronized pour ne pas re-fetcher si un thread
+            // concurrent vient de rafraîchir le cache pendant l'attente du verrou.
+            synchronized (this) {
+                if (!isCacheValid()) {
+                    cache = callMetalsDev();
+                    cacheUpdatedAt = Instant.now();
+                    triggeredFetch = true;
+                }
+            }
         }
-        return toResponse(cache, currency, fromCache);
+        return toResponse(cache, currency, !triggeredFetch);
     }
 
     public LastKnown getLastKnown(String currency) {
@@ -75,10 +87,18 @@ public class MetalsDevService {
     }
 
     private MetalsDevResponse callMetalsDev() {
-        return restClient.get()
-                .uri(baseUrl + "/latest?api_key={key}&currency=USD&unit=toz", apiKey)
-                .retrieve()
-                .body(MetalsDevResponse.class);
+        try {
+            return restClient.get()
+                    .uri(baseUrl + "/latest?api_key={key}&currency=USD&unit=toz", apiKey)
+                    .retrieve()
+                    .body(MetalsDevResponse.class);
+        } catch (Exception e) {
+            // Les exceptions levées par le RestClient embarquent l'URL complète
+            // appelée, API key en clair dans le query param : ne jamais logger
+            // ni propager leur message brut, ni chaîner la cause.
+            log.warn("metals.dev unreachable: {}", e.getClass().getSimpleName());
+            throw new UpstreamUnavailableException();
+        }
     }
 
     private PricesResponse toResponse(MetalsDevResponse raw, String currency, boolean cached) {
