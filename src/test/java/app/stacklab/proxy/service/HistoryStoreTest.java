@@ -44,7 +44,7 @@ class HistoryStoreTest {
     @Test
     void aWindowIsFetchedOnceThenServedFromMemory() {
         MetalsDevService upstream = fullUpstream();
-        HistoryStore store = new HistoryStore(upstream, false);
+        HistoryStore store = new HistoryStore(upstream, false, 0);
 
         HistoryStore.Served first = store.getRange(FLOOR, FLOOR.plusDays(29));
         HistoryStore.Served second = store.getRange(FLOOR, FLOOR.plusDays(29));
@@ -58,7 +58,7 @@ class HistoryStoreTest {
     @Test
     void topUpFetchesOnlyTheMissingTail() {
         MetalsDevService upstream = fullUpstream();
-        HistoryStore store = new HistoryStore(upstream, false);
+        HistoryStore store = new HistoryStore(upstream, false, 0);
 
         store.getRange(FLOOR, FLOOR.plusDays(29));
         HistoryStore.Served extended = store.getRange(FLOOR, FLOOR.plusDays(32));
@@ -78,7 +78,7 @@ class HistoryStoreTest {
             window.remove(omitted.toString()); // jour publié incomplet, omis par fetchWindow
             return window;
         });
-        HistoryStore store = new HistoryStore(upstream, false);
+        HistoryStore store = new HistoryStore(upstream, false, 0);
 
         HistoryStore.Served first = store.getRange(FLOOR, FLOOR.plusDays(10));
         HistoryStore.Served second = store.getRange(FLOOR, FLOOR.plusDays(10));
@@ -97,7 +97,7 @@ class HistoryStoreTest {
         when(upstream.fetchWindow(any(), any()))
             .thenAnswer(inv -> fullWindow(inv.getArgument(0), inv.getArgument(1)))
             .thenThrow(new UpstreamUnavailableException());
-        HistoryStore store = new HistoryStore(upstream, false);
+        HistoryStore store = new HistoryStore(upstream, false, 0);
 
         store.getRange(FLOOR, FLOOR.plusDays(29)); // couvre la première fenêtre
 
@@ -115,7 +115,7 @@ class HistoryStoreTest {
     void coldStoreWithDeadUpstreamEndsUpHonest() throws Exception {
         MetalsDevService upstream = mock(MetalsDevService.class);
         when(upstream.fetchWindow(any(), any())).thenThrow(new UpstreamUnavailableException());
-        HistoryStore store = new HistoryStore(upstream, false);
+        HistoryStore store = new HistoryStore(upstream, false, 0);
         LocalDate end = FLOOR.plusDays(200);
 
         // Premier appel : le réchauffage démarre réellement -> HISTORY_WARMING.
@@ -140,7 +140,7 @@ class HistoryStoreTest {
     @Test
     void longGapWarmsInBackgroundThenServesWhole() throws Exception {
         MetalsDevService upstream = fullUpstream();
-        HistoryStore store = new HistoryStore(upstream, false);
+        HistoryStore store = new HistoryStore(upstream, false, 0);
         LocalDate end = FLOOR.plusDays(200); // ~7 fenêtres : jamais pendant une requête
 
         try {

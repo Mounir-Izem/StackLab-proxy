@@ -55,7 +55,7 @@ class HistoryControllerTest {
 
     private MockMvc mockMvc(MetalsDevService service) {
         // warmup-on-boot=false : les tests contrôlent chaque remplissage.
-        HistoryController controller = new HistoryController(new HistoryStore(service, false), new RateLimiter());
+        HistoryController controller = new HistoryController(new HistoryStore(service, false, 0), new RateLimiter());
         return MockMvcBuilders.standaloneSetup(controller).build();
     }
 
@@ -279,7 +279,7 @@ class HistoryControllerTest {
         RateLimiter shared = new RateLimiter();
         MetalsDevService service = newService(RestClient.builder(), "http://localhost:1");
         MockMvc history = MockMvcBuilders.standaloneSetup(
-            new HistoryController(new HistoryStore(service, false), shared)).build();
+            new HistoryController(new HistoryStore(service, false, 0), shared)).build();
         MockMvc prices = MockMvcBuilders.standaloneSetup(new PricesController(service, shared)).build();
 
         for (int i = 0; i < 10; i++) {

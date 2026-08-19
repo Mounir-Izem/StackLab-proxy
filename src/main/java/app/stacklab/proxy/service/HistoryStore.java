@@ -48,6 +48,8 @@ public class HistoryStore {
     /** Un réchauffage de fond ne se retente pas plus d'une fois par minute. */
     private static final long MIN_WARM_RETRY_MS = 60_000;
 
+    private final long warmupPauseMs;
+
     /** Ce que le magasin a réellement pu servir : end ≤ end demandé, et il fait foi. */
     public record Served(LocalDate end, NavigableMap<String, HistoryDay> days) {}
 
@@ -75,9 +77,11 @@ public class HistoryStore {
     private volatile long lastUpstreamFailureMillis = 0;
 
     public HistoryStore(MetalsDevService metalsDevService,
-                        @Value("${history.warmup-on-boot:true}") boolean warmupOnBoot) {
+                        @Value("${history.warmup-on-boot:true}") boolean warmupOnBoot,
+                        @Value("${history.warmup-pause-ms:1500}") long warmupPauseMs) {
         this.metalsDevService = metalsDevService;
         this.warmupOnBoot = warmupOnBoot;
+        this.warmupPauseMs = warmupPauseMs;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -165,6 +169,11 @@ public class HistoryStore {
                             coveredUntil = to;
                         }
                     }
+                    // Courtoisie upstream : ~120 fenêtres dos à dos ont déclenché
+                    // la limite par minute de metals.dev (constaté en prod,
+                    // 2026-08-19). Espacées, la constitution prend ~3 min — le
+                    // service partiel couvre l'attente côté client.
+                    if (warmupPauseMs > 0) Thread.sleep(warmupPauseMs);
                 }
                 log.info("history warm-up complete up to {}", target);
             } catch (Exception e) {

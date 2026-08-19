@@ -11,6 +11,7 @@ server:
 
 history:
   warmup-on-boot: ${HISTORY_WARMUP_ON_BOOT:true}
+  warmup-pause-ms: ${HISTORY_WARMUP_PAUSE_MS:1500}
 
 metals-dev:
   api-key: ${METALS_DEV_API_KEY:}
