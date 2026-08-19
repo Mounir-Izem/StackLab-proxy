@@ -1,6 +1,7 @@
 package app.stacklab.proxy.controller;
 
 import app.stacklab.proxy.ratelimit.RateLimiter;
+import app.stacklab.proxy.service.HistoryStore;
 import app.stacklab.proxy.service.MetalsDevService;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
@@ -21,11 +22,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * Couvre le lot P-1 : validations de plage -> 400 typés AVANT toute
- * consommation de jeton, passthrough réduit (or/argent USD + 4 devises,
+ * Couvre les lots P-1/P-1b : validations -> 400 typés AVANT toute
+ * consommation de jeton, réduction de la réponse (or/argent USD + 4 devises,
  * jamais le reste), rate limiting partagé -> 429, panne upstream -> 503
- * sans last_known, et l'absence volontaire de cache proxy (deux requêtes
- * identiques = deux appels upstream).
+ * sans last_known, et le gardien (P-1b) : une fenêtre n'est demandée qu'une
+ * fois à l'upstream, un trou long répond 503 HISTORY_WARMING.
  */
 class HistoryControllerTest {
 
@@ -53,7 +54,8 @@ class HistoryControllerTest {
     }
 
     private MockMvc mockMvc(MetalsDevService service) {
-        HistoryController controller = new HistoryController(service, new RateLimiter());
+        // warmup-on-boot=false : les tests contrôlent chaque remplissage.
+        HistoryController controller = new HistoryController(new HistoryStore(service, false), new RateLimiter());
         return MockMvcBuilders.standaloneSetup(controller).build();
     }
 
@@ -72,7 +74,7 @@ class HistoryControllerTest {
     @Test
     void malformedDateReturns400() throws Exception {
         unreachableUpstreamMvc().perform(get("/history")
-                .param("start", "2017-1-1").param("end", "2017-01-31"))
+                .param("start", "2017-1-1").param("end", "2017-01-30"))
             .andExpect(status().isBadRequest())
             .andExpect(jsonPath("$.code").value("INVALID_DATE"));
     }
@@ -86,12 +88,14 @@ class HistoryControllerTest {
     }
 
     @Test
-    void rangeOver31DaysReturns400() throws Exception {
-        // 2017-01-01 -> 2017-02-01 : 32 jours inclusifs, un de trop.
+    void coldStoreLongGapReturnsWarmingNotAnEndlessWait() throws Exception {
+        // P-1b : plus de plafond de plage — mais un magasin froid ne fait pas
+        // attendre la requête pendant ~117 fenêtres : 503 HISTORY_WARMING,
+        // le réchauffage part en fond, le client réessaie.
         unreachableUpstreamMvc().perform(get("/history")
-                .param("start", "2017-01-01").param("end", "2017-02-01"))
-            .andExpect(status().isBadRequest())
-            .andExpect(jsonPath("$.code").value("RANGE_TOO_LARGE"));
+                .param("start", "2017-01-01").param("end", "2017-06-30"))
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.code").value("HISTORY_WARMING"));
     }
 
     @Test
@@ -110,27 +114,28 @@ class HistoryControllerTest {
             .andExpect(status().isBadRequest())
             .andExpect(jsonPath("$.code").value("END_NOT_SETTLED"));
 
-        // La borne exacte : hier UTC passe les validations (503 = l'upstream
-        // injoignable du test, pas un refus de validation).
+        // La borne exacte : hier UTC passe les validations — le 503 vient du
+        // magasin froid (HISTORY_WARMING), pas d'un refus de validation.
         String yesterday = LocalDate.now(ZoneOffset.UTC).minusDays(1).toString();
         mockMvc.perform(get("/history").param("start", yesterday).param("end", yesterday))
-            .andExpect(status().isServiceUnavailable());
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.code").value("HISTORY_WARMING"));
     }
 
     @Test
-    void fullMonthPassesThroughReducedToAppNeeds() throws Exception {
+    void windowPassesThroughReducedToAppNeeds() throws Exception {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         server.expect(ExpectedCount.once(), anything())
             .andRespond(withSuccess(TIMESERIES_JSON, MediaType.APPLICATION_JSON));
         MockMvc mockMvc = mockMvc(newService(builder, "http://fake"));
 
-        // 31 jours inclusifs : la borne exacte vérifiée par l'owner passe.
         mockMvc.perform(get("/history")
-                .param("start", "2017-01-01").param("end", "2017-01-31"))
+                .param("start", "2017-01-01").param("end", "2017-01-02"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.currency").value("USD"))
             .andExpect(jsonPath("$.source").value("metals.dev"))
+            .andExpect(jsonPath("$.end").value("2017-01-02")) // borne servie = borne demandée
             .andExpect(jsonPath("$.days['2017-01-01'].gold").value(1151.9808))
             .andExpect(jsonPath("$.days['2017-01-01'].silver").value(15.9287))
             .andExpect(jsonPath("$.days['2017-01-01'].rates.EUR").value(1.053287))
@@ -143,19 +148,49 @@ class HistoryControllerTest {
     }
 
     @Test
-    void noProxyCacheTwoIdenticalRequestsHitUpstreamTwice() throws Exception {
+    void truncatedWindowReturns503RatherThanPhantomCoverage() throws Exception {
+        // L'upstream répond success mais SANS la dernière date demandée :
+        // l'accepter marquerait ces jours couverts à tort (revue P-1b, C2).
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
-        server.expect(ExpectedCount.times(2), anything())
+        server.expect(ExpectedCount.once(), anything())
+            .andRespond(withSuccess(TIMESERIES_JSON, MediaType.APPLICATION_JSON));
+        mockMvc(newService(builder, "http://fake"))
+            .perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-03"))
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.code").value("HISTORY_UNAVAILABLE"));
+    }
+
+    @Test
+    void successWithEmptyRatesReturns503() throws Exception {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        server.expect(ExpectedCount.once(), anything())
+            .andRespond(withSuccess("{\"status\":\"success\",\"rates\":{}}", MediaType.APPLICATION_JSON));
+        mockMvc(newService(builder, "http://fake"))
+            .perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-02"))
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.code").value("HISTORY_UNAVAILABLE"));
+    }
+
+    @Test
+    void secondIdenticalRequestIsServedFromTheStore() throws Exception {
+        // P-1b : le gardien renverse l'ancien « pas de cache proxy » — une
+        // fenêtre n'est demandée qu'UNE fois à l'upstream, quel que soit le
+        // nombre d'appareils qui la lisent ensuite.
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        server.expect(ExpectedCount.once(), anything())
             .andRespond(withSuccess(TIMESERIES_JSON, MediaType.APPLICATION_JSON));
         MockMvc mockMvc = mockMvc(newService(builder, "http://fake"));
 
         for (int i = 0; i < 2; i++) {
             mockMvc.perform(get("/history")
-                    .param("start", "2017-01-01").param("end", "2017-01-31"))
-                .andExpect(status().isOk());
+                    .param("start", "2017-01-01").param("end", "2017-01-02"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.days['2017-01-01'].gold").value(1151.9808));
         }
-        server.verify(); // échoue si le second appel n'a pas atteint l'upstream
+        server.verify(); // échoue si un second appel upstream a été tenté
     }
 
     @Test
@@ -170,7 +205,7 @@ class HistoryControllerTest {
                 "{\"status\":\"failure\",\"error_code\":1203,\"error_message\":\"quota\"}",
                 MediaType.APPLICATION_JSON));
         mockMvc(newService(builder, "http://fake"))
-            .perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-31"))
+            .perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-02"))
             .andExpect(status().isServiceUnavailable())
             .andExpect(jsonPath("$.code").value("HISTORY_UNAVAILABLE"));
     }
@@ -182,7 +217,7 @@ class HistoryControllerTest {
         server.expect(ExpectedCount.once(), anything())
             .andRespond(withSuccess("{\"status\":\"success\",\"rates\":null}", MediaType.APPLICATION_JSON));
         mockMvc(newService(builder, "http://fake"))
-            .perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-31"))
+            .perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-02"))
             .andExpect(status().isServiceUnavailable())
             .andExpect(jsonPath("$.code").value("HISTORY_UNAVAILABLE"));
     }
@@ -204,8 +239,9 @@ class HistoryControllerTest {
         server.expect(ExpectedCount.once(), anything())
             .andRespond(withSuccess(json, MediaType.APPLICATION_JSON));
         mockMvc(newService(builder, "http://fake"))
-            .perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-31"))
+            .perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-02"))
             .andExpect(status().isOk())
+            .andExpect(jsonPath("$.end").value("2017-01-02")) // servi : le jour omis est connu-absent
             .andExpect(jsonPath("$.days['2017-01-01'].gold").value(1151.98))
             .andExpect(jsonPath("$.days['2017-01-02']").doesNotExist());
     }
@@ -213,7 +249,7 @@ class HistoryControllerTest {
     @Test
     void upstreamFailureReturns503WithoutLastKnown() throws Exception {
         unreachableUpstreamMvc().perform(get("/history")
-                .param("start", "2017-01-01").param("end", "2017-01-31"))
+                .param("start", "2017-01-01").param("end", "2017-01-30"))
             .andExpect(status().isServiceUnavailable())
             .andExpect(jsonPath("$.code").value("HISTORY_UNAVAILABLE"))
             .andExpect(jsonPath("$.last_known").doesNotExist());
@@ -226,11 +262,11 @@ class HistoryControllerTest {
         // mais le jeton est bien consommé avant l'appel upstream).
         for (int i = 0; i < 10; i++) {
             mockMvc.perform(get("/history")
-                    .param("start", "2017-01-01").param("end", "2017-01-31"))
+                    .param("start", "2017-01-01").param("end", "2017-01-30"))
                 .andExpect(status().isServiceUnavailable());
         }
         mockMvc.perform(get("/history")
-                .param("start", "2017-01-01").param("end", "2017-01-31"))
+                .param("start", "2017-01-01").param("end", "2017-01-30"))
             .andExpect(status().isTooManyRequests())
             .andExpect(jsonPath("$.code").value("RATE_LIMITED"));
     }
@@ -242,11 +278,12 @@ class HistoryControllerTest {
         // budget du spot vivant (conséquence assumée, voir chantier P-1b).
         RateLimiter shared = new RateLimiter();
         MetalsDevService service = newService(RestClient.builder(), "http://localhost:1");
-        MockMvc history = MockMvcBuilders.standaloneSetup(new HistoryController(service, shared)).build();
+        MockMvc history = MockMvcBuilders.standaloneSetup(
+            new HistoryController(new HistoryStore(service, false), shared)).build();
         MockMvc prices = MockMvcBuilders.standaloneSetup(new PricesController(service, shared)).build();
 
         for (int i = 0; i < 10; i++) {
-            history.perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-31"))
+            history.perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-30"))
                 .andExpect(status().isServiceUnavailable());
         }
         prices.perform(get("/prices").param("currency", "USD"))
@@ -260,12 +297,12 @@ class HistoryControllerTest {
         MockMvc mockMvc = unreachableUpstreamMvc();
         for (int i = 0; i < 10; i++) {
             mockMvc.perform(get("/history")
-                    .param("start", "2017-01-01").param("end", "2017-01-31")
+                    .param("start", "2017-01-01").param("end", "2017-01-30")
                     .header("X-Forwarded-For", "203.0.113." + i + ", 198.51.100.7"))
                 .andExpect(status().isServiceUnavailable());
         }
         mockMvc.perform(get("/history")
-                .param("start", "2017-01-01").param("end", "2017-01-31")
+                .param("start", "2017-01-01").param("end", "2017-01-30")
                 .header("X-Forwarded-For", "203.0.113.99, 198.51.100.7"))
             .andExpect(status().isTooManyRequests());
     }
@@ -281,7 +318,7 @@ class HistoryControllerTest {
         // La rafale de 10 est intacte : la requête valide passe le limiteur
         // (503 upstream, pas 429).
         mockMvc.perform(get("/history")
-                .param("start", "2017-01-01").param("end", "2017-01-31"))
+                .param("start", "2017-01-01").param("end", "2017-01-30"))
             .andExpect(status().isServiceUnavailable());
     }
 }

@@ -1,7 +1,6 @@
 package app.stacklab.proxy.service;
 
 import app.stacklab.proxy.model.HistoryDay;
-import app.stacklab.proxy.model.HistoryResponse;
 import app.stacklab.proxy.model.LastKnown;
 import app.stacklab.proxy.model.MetalsDevResponse;
 import app.stacklab.proxy.model.MetalsDevTimeseriesDay;
@@ -67,18 +66,28 @@ public class MetalsDevService {
     }
 
     /**
-     * Historique quotidien via Timeseries — AUCUN cache : l'historique est
-     * immuable et stocké côté client (spot_history), le proxy ne fait que
-     * passer et réduire la réponse au besoin de l'app.
+     * Une fenêtre Timeseries (≤ 31 jours inclusifs), réduite au besoin de
+     * l'app. Aucun état ici : le stockage vit dans {@link HistoryStore}
+     * (décision P-1b) ; le cache mémoire de ce service reste réservé au spot
+     * vivant.
      */
-    public HistoryResponse getHistory(LocalDate start, LocalDate end) {
+    public Map<String, HistoryDay> fetchWindow(LocalDate start, LocalDate end) {
         MetalsDevTimeseriesResponse raw = callTimeseries(start, end);
-        if (raw == null || !"success".equals(raw.status()) || raw.rates() == null) {
+        if (raw == null || !"success".equals(raw.status()) || raw.rates() == null || raw.rates().isEmpty()) {
             // metals.dev signale ses pannes DANS le corps (status=failure :
-            // quota 1203, clé 1101, plan 1201). Un 200 aux days vides serait un
+            // quota 1203, clé 1101, plan 1201). Un résultat vide serait un
             // mensonge que le client graverait comme un fait (« pas de spot »).
             // Le status est sûr à logger — jamais le corps entier ni l'URL.
             log.warn("metals.dev timeseries unusable: status={}", raw == null ? "no-body" : raw.status());
+            throw new UpstreamUnavailableException();
+        }
+        if (!raw.rates().containsKey(end.toString())) {
+            // Fenêtre tronquée : la dernière date demandée n'est pas dans la
+            // réponse (jour pas encore publié, ou borne de fenêtre plus basse
+            // que prévu). L'accepter marquerait ces jours couverts à tort —
+            // on échoue, la frontière n'avance pas, on redemandera plus tard.
+            // Fait empirique owner : une plage publiée n'a pas de trous.
+            log.warn("metals.dev timeseries window truncated");
             throw new UpstreamUnavailableException();
         }
         Map<String, HistoryDay> days = new TreeMap<>();
@@ -86,7 +95,7 @@ public class MetalsDevService {
             HistoryDay mapped = toHistoryDay(day);
             if (mapped != null) days.put(date, mapped);
         });
-        return new HistoryResponse(start.toString(), end.toString(), "USD", "metals.dev", days);
+        return days;
     }
 
     public LastKnown getLastKnown(String currency) {

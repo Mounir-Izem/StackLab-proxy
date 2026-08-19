@@ -1,0 +1,18 @@
+# Classpath de TEST : ce fichier masque le application.yaml principal pour
+# tout @SpringBootTest. Garde-fou machine : aucun contexte de test ne peut
+# déclencher le réchauffage (~120 fenêtres) ni joindre le vrai metals.dev,
+# même si un futur test oublie de le demander.
+spring:
+  application:
+    name: proxy
+
+server:
+  port: 0
+
+history:
+  warmup-on-boot: false
+
+metals-dev:
+  api-key: test-key
+  base-url: http://localhost:1
+  cache-ttl-minutes: 60

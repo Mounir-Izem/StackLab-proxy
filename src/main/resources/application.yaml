@@ -4,6 +4,13 @@ spring:
 
 server:
   port: ${PORT:8080}
+  compression:
+    enabled: true
+    mime-types: application/json
+    min-response-size: 2KB
+
+history:
+  warmup-on-boot: ${HISTORY_WARMUP_ON_BOOT:true}
 
 metals-dev:
   api-key: ${METALS_DEV_API_KEY:}
