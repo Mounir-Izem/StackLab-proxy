@@ -71,7 +71,15 @@ public class MetalsDevService {
      * (décision P-1b) ; le cache mémoire de ce service reste réservé au spot
      * vivant.
      */
-    public Map<String, HistoryDay> fetchWindow(LocalDate start, LocalDate end) {
+    /**
+     * Une fenêtre servie, et jusqu'où elle couvre RÉELLEMENT. `coveredThrough`
+     * = le dernier jour présent dans la réponse brute (même publié incomplet),
+     * jamais au-delà : la queue non publiée n'est pas couverte, elle sera
+     * redemandée — et rien de fantôme n'est marqué couvert.
+     */
+    public record FetchedWindow(Map<String, HistoryDay> days, LocalDate coveredThrough) {}
+
+    public FetchedWindow fetchWindow(LocalDate start, LocalDate end) {
         MetalsDevTimeseriesResponse raw = callTimeseries(start, end);
         if (raw == null || !"success".equals(raw.status()) || raw.rates() == null || raw.rates().isEmpty()) {
             // metals.dev signale ses pannes DANS le corps (status=failure :
@@ -81,21 +89,34 @@ public class MetalsDevService {
             log.warn("metals.dev timeseries unusable: status={}", raw == null ? "no-body" : raw.status());
             throw new UpstreamUnavailableException();
         }
-        if (!raw.rates().containsKey(end.toString())) {
-            // Fenêtre tronquée : la dernière date demandée n'est pas dans la
-            // réponse (jour pas encore publié, ou borne de fenêtre plus basse
-            // que prévu). L'accepter marquerait ces jours couverts à tort —
-            // on échoue, la frontière n'avance pas, on redemandera plus tard.
-            // Fait empirique owner : une plage publiée n'a pas de trous.
-            log.warn("metals.dev timeseries window truncated");
+        // La fenêtre FINALE d'un remplissage finit sur hier, que metals.dev
+        // publie avec des heures de retard : sa réponse s'arrête alors avant
+        // `end`, et c'est NORMAL — jeter la fenêtre entière perdait jusqu'à
+        // 29 jours publiés à chaque redémarrage (constaté en prod, QA P-4).
+        // La couverture avance jusqu'au dernier jour répondu, exactement.
+        String maxDate = null;
+        for (String date : raw.rates().keySet()) {
+            if (maxDate == null || date.compareTo(maxDate) > 0) maxDate = date;
+        }
+        LocalDate coveredThrough;
+        try {
+            coveredThrough = LocalDate.parse(maxDate);
+        } catch (Exception e) {
+            log.warn("metals.dev timeseries unusable: {}", e.getClass().getSimpleName());
+            throw new UpstreamUnavailableException();
+        }
+        if (coveredThrough.isAfter(end)) coveredThrough = end;
+        if (coveredThrough.isBefore(start)) {
+            // Réponse entièrement hors de la plage demandée : inutilisable.
+            log.warn("metals.dev timeseries window out of range");
             throw new UpstreamUnavailableException();
         }
         Map<String, HistoryDay> days = new TreeMap<>();
         raw.rates().forEach((date, day) -> {
             HistoryDay mapped = toHistoryDay(day);
-            if (mapped != null) days.put(date, mapped);
+            if (mapped != null && date.compareTo(end.toString()) <= 0) days.put(date, mapped);
         });
-        return days;
+        return new FetchedWindow(days, coveredThrough);
     }
 
     public LastKnown getLastKnown(String currency) {

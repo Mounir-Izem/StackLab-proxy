@@ -12,7 +12,6 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
-import java.util.Map;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
@@ -133,14 +132,22 @@ public class HistoryStore {
             new TreeMap<>(days.subMap(start.toString(), true, servedEnd.toString(), true)));
     }
 
-    /** Avance la frontière jusqu'à target (inclus), fenêtre par fenêtre. Appeler sous verrou. */
+    /**
+     * Avance la frontière vers target, fenêtre par fenêtre. Appeler sous
+     * verrou. La frontière avance jusqu'au dernier jour RÉELLEMENT répondu
+     * (`coveredThrough`) : si une fenêtre revient courte (la queue pas encore
+     * publiée), on s'arrête là honnêtement — la suite sera redemandée quand
+     * metals.dev l'aura publiée, et rien de fantôme n'est marqué couvert.
+     */
     private void fillTo(LocalDate target) {
         LocalDate from = coveredUntil == null ? HISTORY_FLOOR : coveredUntil.plusDays(1);
         while (!from.isAfter(target)) {
             LocalDate to = from.plusDays(WINDOW_DAYS - 1);
             if (to.isAfter(target)) to = target;
-            days.putAll(metalsDevService.fetchWindow(from, to));
-            coveredUntil = to;
+            MetalsDevService.FetchedWindow window = metalsDevService.fetchWindow(from, to);
+            days.putAll(window.days());
+            coveredUntil = window.coveredThrough();
+            if (window.coveredThrough().isBefore(to)) return;
             from = to.plusDays(1);
         }
     }
@@ -167,16 +174,19 @@ public class HistoryStore {
                     if (from.isAfter(target)) break;
                     LocalDate to = from.plusDays(WINDOW_DAYS - 1);
                     if (to.isAfter(target)) to = target;
-                    Map<String, HistoryDay> window = metalsDevService.fetchWindow(from, to);
+                    MetalsDevService.FetchedWindow window = metalsDevService.fetchWindow(from, to);
                     synchronized (this) {
                         // Un remplissage synchrone concurrent a pu dépasser cette
                         // fenêtre pendant le fetch (double fetch bénin, borné) :
                         // la frontière n'avance que vers l'avant.
-                        if (coveredUntil == null || coveredUntil.isBefore(to)) {
-                            days.putAll(window);
-                            coveredUntil = to;
+                        if (coveredUntil == null || coveredUntil.isBefore(window.coveredThrough())) {
+                            days.putAll(window.days());
+                            coveredUntil = window.coveredThrough();
                         }
                     }
+                    // Fenêtre courte = la queue n'est pas encore publiée : le
+                    // réchauffage a fini son travail POSSIBLE, il s'arrête là.
+                    if (window.coveredThrough().isBefore(to)) break;
                     // Courtoisie upstream : ~120 fenêtres dos à dos ont déclenché
                     // la limite par minute de metals.dev (constaté en prod,
                     // 2026-08-19). Espacées, la constitution prend ~3 min — le

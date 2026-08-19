@@ -149,17 +149,21 @@ class HistoryControllerTest {
     }
 
     @Test
-    void truncatedWindowReturns503RatherThanPhantomCoverage() throws Exception {
-        // L'upstream répond success mais SANS la dernière date demandée :
-        // l'accepter marquerait ces jours couverts à tort (revue P-1b, C2).
+    void tailNotYetPublishedServesWhatCameNeverPhantomNeverWasted() throws Exception {
+        // L'upstream répond success mais s'arrête AVANT la dernière date
+        // demandée (la queue pas encore publiée — le quotidien). Ni jetée
+        // (QA P-4 : on perdait jusqu'à 29 jours publiés au réchauffage), ni
+        // fantôme : le `end` servi = le dernier jour réellement répondu.
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         server.expect(ExpectedCount.once(), anything())
             .andRespond(withSuccess(TIMESERIES_JSON, MediaType.APPLICATION_JSON));
         mockMvc(newService(builder, "http://fake"))
             .perform(get("/history").param("start", "2017-01-01").param("end", "2017-01-03"))
-            .andExpect(status().isServiceUnavailable())
-            .andExpect(jsonPath("$.code").value("HISTORY_UNAVAILABLE"));
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.end").value("2017-01-02"))
+            .andExpect(jsonPath("$.days['2017-01-02'].gold").value(1150.5097))
+            .andExpect(jsonPath("$.days['2017-01-03']").doesNotExist());
     }
 
     @Test

@@ -37,7 +37,7 @@ class HistoryStoreTest {
     private MetalsDevService fullUpstream() {
         MetalsDevService upstream = mock(MetalsDevService.class);
         when(upstream.fetchWindow(any(), any()))
-            .thenAnswer(inv -> fullWindow(inv.getArgument(0), inv.getArgument(1)));
+            .thenAnswer(inv -> new MetalsDevService.FetchedWindow(fullWindow(inv.getArgument(0), inv.getArgument(1)), inv.getArgument(1)));
         return upstream;
     }
 
@@ -76,7 +76,7 @@ class HistoryStoreTest {
         when(upstream.fetchWindow(any(), any())).thenAnswer(inv -> {
             Map<String, HistoryDay> window = fullWindow(inv.getArgument(0), inv.getArgument(1));
             window.remove(omitted.toString()); // jour publié incomplet, omis par fetchWindow
-            return window;
+            return new MetalsDevService.FetchedWindow(window, inv.getArgument(1));
         });
         HistoryStore store = new HistoryStore(upstream, false, 0);
 
@@ -92,10 +92,36 @@ class HistoryStoreTest {
     }
 
     @Test
+    void shortWindowAdvancesExactlyToWhatCameAndStops() {
+        // La fenêtre finale d'un remplissage revient courte quand la queue
+        // n'est pas encore publiée (QA P-4) : la frontière avance au dernier
+        // jour répondu — jamais jetée, jamais fantôme.
+        MetalsDevService upstream = mock(MetalsDevService.class);
+        when(upstream.fetchWindow(any(), any())).thenAnswer(inv -> {
+            LocalDate from = inv.getArgument(0);
+            LocalDate to = inv.getArgument(1);
+            LocalDate published = FLOOR.plusDays(35); // le monde s'arrête là
+            LocalDate served = to.isAfter(published) ? published : to;
+            return new MetalsDevService.FetchedWindow(fullWindow(from, served), served);
+        });
+        HistoryStore store = new HistoryStore(upstream, false, 0);
+
+        HistoryStore.Served r = store.getRange(FLOOR, FLOOR.plusDays(29));
+        assertThat(r.end()).isEqualTo(FLOOR.plusDays(29));
+
+        // La 2e fenêtre [30..59] revient courte (jusqu'à 35) : servi partiel,
+        // frontière = 35, et UN SEUL appel pour cette fenêtre (pas de boucle).
+        HistoryStore.Served partial = store.getRange(FLOOR, FLOOR.plusDays(59));
+        assertThat(partial.end()).isEqualTo(FLOOR.plusDays(35));
+        assertThat(partial.days()).hasSize(36);
+        verify(upstream, times(2)).fetchWindow(any(), any());
+    }
+
+    @Test
     void tailFailureServesWhatIsCoveredAndCoolsDown() {
         MetalsDevService upstream = mock(MetalsDevService.class);
         when(upstream.fetchWindow(any(), any()))
-            .thenAnswer(inv -> fullWindow(inv.getArgument(0), inv.getArgument(1)))
+            .thenAnswer(inv -> new MetalsDevService.FetchedWindow(fullWindow(inv.getArgument(0), inv.getArgument(1)), inv.getArgument(1)))
             .thenThrow(new UpstreamUnavailableException());
         HistoryStore store = new HistoryStore(upstream, false, 0);
 
@@ -115,7 +141,7 @@ class HistoryStoreTest {
     void worldExhaustedServesEmptyWithItsFrontierNotAnError() {
         MetalsDevService upstream = mock(MetalsDevService.class);
         when(upstream.fetchWindow(any(), any()))
-            .thenAnswer(inv -> fullWindow(inv.getArgument(0), inv.getArgument(1)))
+            .thenAnswer(inv -> new MetalsDevService.FetchedWindow(fullWindow(inv.getArgument(0), inv.getArgument(1)), inv.getArgument(1)))
             .thenThrow(new UpstreamUnavailableException());
         HistoryStore store = new HistoryStore(upstream, false, 0);
 
