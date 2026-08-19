@@ -1,7 +1,11 @@
 package app.stacklab.proxy.service;
 
+import app.stacklab.proxy.model.HistoryDay;
+import app.stacklab.proxy.model.HistoryResponse;
 import app.stacklab.proxy.model.LastKnown;
 import app.stacklab.proxy.model.MetalsDevResponse;
+import app.stacklab.proxy.model.MetalsDevTimeseriesDay;
+import app.stacklab.proxy.model.MetalsDevTimeseriesResponse;
 import app.stacklab.proxy.model.PricesResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,12 +16,14 @@ import org.springframework.web.client.RestClient;
 import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 @Service
 public class MetalsDevService {
@@ -60,6 +66,29 @@ public class MetalsDevService {
         return toResponse(cache, currency, !triggeredFetch);
     }
 
+    /**
+     * Historique quotidien via Timeseries — AUCUN cache : l'historique est
+     * immuable et stocké côté client (spot_history), le proxy ne fait que
+     * passer et réduire la réponse au besoin de l'app.
+     */
+    public HistoryResponse getHistory(LocalDate start, LocalDate end) {
+        MetalsDevTimeseriesResponse raw = callTimeseries(start, end);
+        if (raw == null || !"success".equals(raw.status()) || raw.rates() == null) {
+            // metals.dev signale ses pannes DANS le corps (status=failure :
+            // quota 1203, clé 1101, plan 1201). Un 200 aux days vides serait un
+            // mensonge que le client graverait comme un fait (« pas de spot »).
+            // Le status est sûr à logger — jamais le corps entier ni l'URL.
+            log.warn("metals.dev timeseries unusable: status={}", raw == null ? "no-body" : raw.status());
+            throw new UpstreamUnavailableException();
+        }
+        Map<String, HistoryDay> days = new TreeMap<>();
+        raw.rates().forEach((date, day) -> {
+            HistoryDay mapped = toHistoryDay(day);
+            if (mapped != null) days.put(date, mapped);
+        });
+        return new HistoryResponse(start.toString(), end.toString(), "USD", "metals.dev", days);
+    }
+
     public LastKnown getLastKnown(String currency) {
         if (cache == null) return null;
         double gold = convertPrice(cache.metals().get("gold"), currency, cache.currencies());
@@ -99,6 +128,44 @@ public class MetalsDevService {
             log.warn("metals.dev unreachable: {}", e.getClass().getSimpleName());
             throw new UpstreamUnavailableException();
         }
+    }
+
+    private MetalsDevTimeseriesResponse callTimeseries(LocalDate start, LocalDate end) {
+        try {
+            return restClient.get()
+                    .uri(baseUrl + "/timeseries?api_key={key}&start_date={start}&end_date={end}&currency=USD&unit=toz",
+                            apiKey, start.toString(), end.toString())
+                    .retrieve()
+                    .body(MetalsDevTimeseriesResponse.class);
+        } catch (Exception e) {
+            // Même piège que callMetalsDev : le message d'exception embarque
+            // l'URL complète, API key incluse — classe seule au log, exception
+            // neutre sans cause chaînée.
+            log.warn("metals.dev timeseries unreachable: {}", e.getClass().getSimpleName());
+            throw new UpstreamUnavailableException();
+        }
+    }
+
+    /**
+     * Un jour incomplet (or, argent OU l'un des quatre taux absent) n'est pas
+     * restitué du tout : jour présent = jour complet. Le client grave chaque
+     * jour reçu définitivement dans spot_history sans jamais le redemander —
+     * un jour partiel produirait une prime calculée au mauvais taux, présentée
+     * comme un fait de registre.
+     */
+    private HistoryDay toHistoryDay(MetalsDevTimeseriesDay day) {
+        if (day == null || day.metals() == null || day.currencies() == null) return null;
+        Double gold = day.metals().get("gold");
+        Double silver = day.metals().get("silver");
+        if (gold == null || silver == null) return null;
+
+        Map<String, Double> rates = new HashMap<>();
+        for (String c : List.of("EUR", "GBP", "CAD", "AUD")) {
+            Double rate = day.currencies().get(c);
+            if (rate == null) return null;
+            rates.put(c, rate);
+        }
+        return new HistoryDay(gold, silver, rates);
     }
 
     private PricesResponse toResponse(MetalsDevResponse raw, String currency, boolean cached) {

@@ -35,7 +35,7 @@ public class PricesController {
             return ResponseEntity.status(400).body(
                 new ErrorResponse("Unsupported currency", "UNSUPPORTED_CURRENCY", null));
         }
-        if (!rateLimiter.allow(clientIp(request))) {
+        if (!rateLimiter.allow(ClientIp.from(request))) {
             return ResponseEntity.status(429).body(
                 new ErrorResponse("Too many requests", "RATE_LIMITED", null));
         }
@@ -67,19 +67,5 @@ public class PricesController {
     @GetMapping("/health")
     public ResponseEntity<Map<String, String>> health() {
         return ResponseEntity.ok(Map.of("status", "ok"));
-    }
-
-    // Render est derrière un proxy TLS : l'IP vue par Render est AJOUTÉE en
-    // FIN de X-Forwarded-For. Le premier élément est contrôlable par le client
-    // (en-tête forgé) — le prendre permettrait de contourner la limite par IP
-    // en tournant des adresses inventées. Le DERNIER élément est celui que
-    // Render a réellement constaté.
-    private String clientIp(HttpServletRequest request) {
-        String forwardedFor = request.getHeader("X-Forwarded-For");
-        if (forwardedFor != null && !forwardedFor.isBlank()) {
-            String[] parts = forwardedFor.split(",");
-            return parts[parts.length - 1].trim();
-        }
-        return request.getRemoteAddr();
     }
 }
