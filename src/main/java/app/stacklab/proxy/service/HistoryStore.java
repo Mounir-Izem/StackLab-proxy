@@ -114,11 +114,19 @@ public class HistoryStore {
                 }
             }
         }
-        if (coveredUntil == null || coveredUntil.isBefore(start)) {
+        if (coveredUntil == null) {
             if (warming) throw new HistoryWarmingException();
             // Rien à servir et aucune constitution en cours : c'est une panne,
             // pas une attente — jamais un « réessayez » qui ment (revue P-1b, C1).
             throw new UpstreamUnavailableException();
+        }
+        if (coveredUntil.isBefore(start)) {
+            // Le monde n'a RIEN de plus récent que la frontière du client (la
+            // veille pas encore publiée par metals.dev — le cas quotidien
+            // nominal, revue P-2 C1). Ce n'est pas une panne : on répond 200
+            // avec le `end` réellement couvert, même s'il précède le `start`
+            // demandé — « voilà jusqu'où va le monde, tu l'as déjà ».
+            return new Served(coveredUntil, new TreeMap<>());
         }
         LocalDate servedEnd = coveredUntil.isBefore(end) ? coveredUntil : end;
         return new Served(servedEnd,

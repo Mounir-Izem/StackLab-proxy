@@ -16,6 +16,7 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.anything;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withException;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -244,6 +245,31 @@ class HistoryControllerTest {
             .andExpect(jsonPath("$.end").value("2017-01-02")) // servi : le jour omis est connu-absent
             .andExpect(jsonPath("$.days['2017-01-01'].gold").value(1151.98))
             .andExpect(jsonPath("$.days['2017-01-02']").doesNotExist());
+    }
+
+    @Test
+    void nothingNewerReturns200WithWorldFrontierBeforeStart() throws Exception {
+        // Le cas quotidien nominal (revue P-2, C1) : le client est à jour, la
+        // veille n'est pas publiée. Réponse : 200, end = frontière du monde
+        // (AVANT le start demandé), days vide — jamais un 503 qui ment.
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        server.expect(ExpectedCount.once(), anything())
+            .andRespond(withSuccess(TIMESERIES_JSON, MediaType.APPLICATION_JSON));
+        // La queue demandée ensuite est injoignable côté upstream.
+        server.expect(ExpectedCount.once(), anything())
+            .andRespond(withException(new java.net.ConnectException("refused")));
+        MockMvc mockMvc = mockMvc(newService(builder, "http://fake"));
+
+        mockMvc.perform(get("/history")
+                .param("start", "2017-01-01").param("end", "2017-01-02"))
+            .andExpect(status().isOk());
+
+        mockMvc.perform(get("/history")
+                .param("start", "2017-01-03").param("end", "2017-01-05"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.end").value("2017-01-02"))
+            .andExpect(jsonPath("$.days").isEmpty());
     }
 
     @Test

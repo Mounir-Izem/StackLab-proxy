@@ -112,6 +112,24 @@ class HistoryStoreTest {
     }
 
     @Test
+    void worldExhaustedServesEmptyWithItsFrontierNotAnError() {
+        MetalsDevService upstream = mock(MetalsDevService.class);
+        when(upstream.fetchWindow(any(), any()))
+            .thenAnswer(inv -> fullWindow(inv.getArgument(0), inv.getArgument(1)))
+            .thenThrow(new UpstreamUnavailableException());
+        HistoryStore store = new HistoryStore(upstream, false, 0);
+
+        store.getRange(FLOOR, FLOOR.plusDays(29)); // couvre la première fenêtre
+
+        // Le client demande AU-DELÀ du couvert (la veille pas publiée — le cas
+        // quotidien) et la tentative upstream échoue : réponse honnête « le
+        // monde s'arrête à ma frontière » — 200 vide, jamais une panne.
+        HistoryStore.Served served = store.getRange(FLOOR.plusDays(30), FLOOR.plusDays(30));
+        assertThat(served.end()).isEqualTo(FLOOR.plusDays(29));
+        assertThat(served.days()).isEmpty();
+    }
+
+    @Test
     void coldStoreWithDeadUpstreamEndsUpHonest() throws Exception {
         MetalsDevService upstream = mock(MetalsDevService.class);
         when(upstream.fetchWindow(any(), any())).thenThrow(new UpstreamUnavailableException());
